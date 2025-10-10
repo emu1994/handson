@@ -1,0 +1,227 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini Teams Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+      :root { --bg: #0b1220; --card: #121a2b; --muted: #93a3b8; --text: #e7eef8; --accent: #5b9aff; }
+      * { box-sizing: border-box; }
+      body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
+      .app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; }
+      .sidebar { background: var(--card); border-right: 1px solid rgba(255,255,255,0.06); padding: 12px; display:flex; flex-direction:column; gap: 12px; }
+      .section-title { font-size: 12px; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; margin: 6px 0; }
+      .list { display: flex; flex-direction: column; gap: 6px; }
+      .item { padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+      .item:hover { background: rgba(255,255,255,0.06); }
+      .item.active { background: rgba(91,154,255,0.22); color: white; }
+      .presence { font-size: 12px; color: var(--muted); }
+      .content { display:flex; flex-direction: column; height: 100vh; }
+      .header { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); display:flex; align-items:center; gap:12px; }
+      .messages { flex:1; overflow-y:auto; padding: 16px; display:flex; flex-direction:column; gap: 10px; }
+      .msg { background: var(--card); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 10px 12px; }
+      .msg .meta { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      .composer { display:flex; padding: 12px; gap: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+      input, button { font: inherit; }
+      .input { flex:1; background: var(--card); color: var(--text); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; padding: 10px 12px; outline:none; }
+      .btn { background: var(--accent); color: white; border: none; border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+      .row { display:flex; gap:8px; }
+      .muted { color: var(--muted); }
+      .inline { display:inline; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="sidebar">
+        <div>
+          <div class="section-title">You</div>
+          <div class="row">
+            <input id="nameInput" class="input" placeholder="Display name" />
+            <button id="saveNameBtn" class="btn">Save</button>
+          </div>
+        </div>
+        <div>
+          <div class="section-title">Teams <span id="presence" class="presence"></span></div>
+          <div id="teams" class="list"></div>
+          <div class="row">
+            <input id="newTeamName" class="input" placeholder="New team name" />
+            <button id="addTeamBtn" class="btn">Add</button>
+          </div>
+        </div>
+        <div>
+          <div class="section-title">Channels</div>
+          <div id="channels" class="list"></div>
+          <div class="row">
+            <input id="newChannelName" class="input" placeholder="New channel name" />
+            <button id="addChannelBtn" class="btn">Add</button>
+          </div>
+        </div>
+      </div>
+      <div class="content">
+        <div class="header">
+          <div id="headerTitle">Select a team/channel</div>
+          <div id="typing" class="muted"></div>
+        </div>
+        <div id="messages" class="messages"></div>
+        <form id="composer" class="composer">
+          <input id="messageInput" class="input" placeholder="Message #channel" autocomplete="off" />
+          <button class="btn" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const ioClient = io();
+
+      const el = (id) => document.getElementById(id);
+      const teamsEl = el('teams');
+      const channelsEl = el('channels');
+      const messagesEl = el('messages');
+      const headerTitleEl = el('headerTitle');
+      const presenceEl = el('presence');
+      const typingEl = el('typing');
+
+      let current = { teamId: null, channelId: null, name: localStorage.getItem('name') || '' };
+      el('nameInput').value = current.name;
+
+      function setActive(container, id) {
+        Array.from(container.children).forEach((child) => child.classList.remove('active'));
+        const target = Array.from(container.children).find((c) => c.dataset.id === id);
+        if (target) target.classList.add('active');
+      }
+
+      function addListItem(container, { id, label }, onClick) {
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.textContent = label;
+        div.dataset.id = id;
+        div.onclick = () => onClick(id);
+        container.appendChild(div);
+        return div;
+      }
+
+      function renderMessage(msg) {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = `${msg.userName} • ${new Date(msg.createdAt).toLocaleTimeString()}`;
+        const body = document.createElement('div');
+        body.textContent = msg.text;
+        wrap.appendChild(meta);
+        wrap.appendChild(body);
+        messagesEl.appendChild(wrap);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      async function fetchJSON(url, opts = {}) {
+        const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+        if (!res.ok) throw new Error('request failed');
+        return res.json();
+      }
+
+      async function loadTeams() {
+        teamsEl.innerHTML = '';
+        const teams = await fetchJSON('/api/teams');
+        teams.forEach((t) => addListItem(teamsEl, { id: t.id, label: t.name }, (id) => selectTeam(id)));
+      }
+
+      async function selectTeam(teamId) {
+        current.teamId = teamId;
+        setActive(teamsEl, teamId);
+        ioClient.emit('joinTeam', { teamId });
+        presenceEl.textContent = '';
+        await loadChannels();
+      }
+
+      async function loadChannels() {
+        channelsEl.innerHTML = '';
+        messagesEl.innerHTML = '';
+        if (!current.teamId) return;
+        const channels = await fetchJSON(`/api/teams/${current.teamId}/channels`);
+        channels.forEach((c) => addListItem(channelsEl, { id: c.id, label: `# ${c.name}` }, (id) => selectChannel(id)));
+      }
+
+      async function selectChannel(channelId) {
+        current.channelId = channelId;
+        setActive(channelsEl, channelId);
+        ioClient.emit('joinChannel', { channelId });
+        headerTitleEl.textContent = `# ${Array.from(channelsEl.children).find((c) => c.dataset.id === channelId)?.textContent || 'channel'}`;
+        messagesEl.innerHTML = '';
+        const msgs = await fetchJSON(`/api/channels/${channelId}/messages?limit=100`);
+        msgs.forEach(renderMessage);
+      }
+
+      // Name handling
+      el('saveNameBtn').onclick = () => {
+        const name = el('nameInput').value.trim();
+        current.name = name;
+        localStorage.setItem('name', name);
+        ioClient.emit('register', { name });
+      };
+
+      // Add team/channel
+      el('addTeamBtn').onclick = async () => {
+        const name = el('newTeamName').value.trim();
+        if (!name) return;
+        await fetchJSON('/api/teams', { method: 'POST', body: JSON.stringify({ name }) });
+        el('newTeamName').value = '';
+        await loadTeams();
+      };
+
+      el('addChannelBtn').onclick = async () => {
+        const name = el('newChannelName').value.trim();
+        if (!name || !current.teamId) return;
+        await fetchJSON(`/api/teams/${current.teamId}/channels`, { method: 'POST', body: JSON.stringify({ name }) });
+        el('newChannelName').value = '';
+        await loadChannels();
+      };
+
+      // Composer
+      const composer = document.getElementById('composer');
+      const messageInput = document.getElementById('messageInput');
+      composer.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const text = messageInput.value.trim();
+        if (!text || !current.channelId) return;
+        ioClient.emit('message:send', { channelId: current.channelId, text });
+        messageInput.value = '';
+        ioClient.emit('typing:stop', { channelId: current.channelId });
+      });
+
+      let typingTimer = null;
+      messageInput.addEventListener('input', () => {
+        if (!current.channelId) return;
+        ioClient.emit('typing:start', { channelId: current.channelId });
+        clearTimeout(typingTimer);
+        typingTimer = setTimeout(() => ioClient.emit('typing:stop', { channelId: current.channelId }), 800);
+      });
+
+      // Realtime events
+      ioClient.on('team:created', async () => { await loadTeams(); });
+      ioClient.on('channel:created', async (channel) => {
+        if (channel.teamId === current.teamId) await loadChannels();
+      });
+      ioClient.on('message:new', (msg) => {
+        if (msg.channelId === current.channelId) renderMessage(msg);
+      });
+      ioClient.on('presence:update', ({ teamId, count }) => {
+        if (teamId === current.teamId) presenceEl.textContent = `• ${count} online`;
+      });
+      ioClient.on('typing', ({ channelId, name, isTyping }) => {
+        if (channelId !== current.channelId) return;
+        typingEl.textContent = isTyping ? `${name} is typing…` : '';
+      });
+
+      async function boot() {
+        if (current.name) ioClient.emit('register', { name: current.name });
+        await loadTeams();
+      }
+      boot();
+    </script>
+  </body>
+</html>
